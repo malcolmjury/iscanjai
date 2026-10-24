@@ -32,6 +32,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-body);fo
 img{max-width:100%}[hidden]{display:none!important}
 .settings{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:12px}
 .toolbar{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.dup{margin-top:6px;font-size:.9rem;color:var(--danger)}
 .settings-key{display:flex;flex-direction:column;gap:6px}
 input.missing{border-color:var(--c-shop);background:var(--accent-soft)}
 .ocr summary{cursor:pointer;color:var(--muted);font-size:.9rem}
@@ -134,13 +135,13 @@ input.amount{font-family:var(--f-mono);font-size:1.1rem}
   <section class="scan" id="scanZone" aria-label="Add a payment">
     <div>
       <h2>Add a slip</h2>
-      <div class="empty-note">Choose a screenshot of a bank slip or receipt. iScanJai reads the amount, payee, date and note, then you check it before saving.</div>
+      <div class="empty-note">Choose one or more screenshots of bank slips or receipts. iScanJai reads the amount, payee, date and note, then you check it before saving.</div>
       <div class="empty-note" id="readerNote"></div>
     </div>
     <div class="scan-row">
-      <button class="btn btn-primary" id="pickBtn">Read a slip</button>
+      <button class="btn btn-primary" id="pickBtn">Read slips</button>
       <button class="btn btn-ghost" id="manualBtn">Enter by hand</button>
-      <input type="file" id="fileIn" accept="image/*" hidden>
+      <input type="file" id="fileIn" accept="image/*" multiple hidden>
     </div>
     <div class="status" id="status" role="status"></div>
   </section>
@@ -148,7 +149,8 @@ input.amount{font-family:var(--f-mono);font-size:1.1rem}
   <section class="review" id="review" hidden aria-label="Check details">
     <div class="review-top">
       <img class="thumb" id="thumb" alt="Slip preview" hidden>
-      <div><h2 id="reviewTitle">Check the details</h2><div class="empty-note">Fix anything that looks wrong, then save.</div></div>
+      <div><h2 id="reviewTitle">Check the details</h2><div class="empty-note">Fix anything that looks wrong, then save.</div>
+        <div class="dup" id="dupNote" hidden>A payment with this reference is already saved. Skip this slip unless it's a different payment.</div></div>
     </div>
     <form id="form" class="grid">
       <label class="full"><span class="label">Paid to</span><input id="f-merchant" required></label>
@@ -161,6 +163,7 @@ input.amount{font-family:var(--f-mono);font-size:1.1rem}
       <label class="full"><span class="label">Note</span><input id="f-note"></label>
       <details class="full ocr" id="ocrBox" hidden><summary>Text found on the slip</summary><pre id="ocrText"></pre></details>
       <div class="actions full">
+        <button type="button" class="btn btn-ghost" id="stopBtn" hidden>Stop</button>
         <button type="button" class="btn btn-ghost" id="cancelBtn">Cancel</button>
         <button type="submit" class="btn btn-primary" id="saveBtn">Save payment</button>
       </div>
@@ -405,12 +408,12 @@ $("exportBtn").onclick=()=>{
 };
 
 $("pickBtn").onclick=()=>$("fileIn").click();
-$("fileIn").onchange=e=>{const f=e.target.files[0];e.target.value="";if(f)readSlip(f)};
+$("fileIn").onchange=e=>{const fs=[...e.target.files];e.target.value="";addFiles(fs)};
 const zone=$("scanZone");
 zone.addEventListener("dragover",e=>{e.preventDefault();zone.classList.add("drag")});
 zone.addEventListener("dragleave",()=>zone.classList.remove("drag"));
-zone.addEventListener("drop",e=>{e.preventDefault();zone.classList.remove("drag");const f=e.dataTransfer.files[0];if(f&&f.type.startsWith("image/"))readSlip(f)});
-document.addEventListener("paste",e=>{const it=[...(e.clipboardData?.items||[])].find(i=>i.type.startsWith("image/"));if(it)readSlip(it.getAsFile())});
+zone.addEventListener("drop",e=>{e.preventDefault();zone.classList.remove("drag");addFiles([...e.dataTransfer.files])});
+document.addEventListener("paste",e=>{const fs=[...(e.clipboardData?.items||[])].filter(i=>i.type.startsWith("image/")).map(i=>i.getAsFile()).filter(Boolean);if(fs.length)addFiles(fs)});
 
 const PROMPT=`The image is a payment slip, bank transfer confirmation or shop receipt (often from a Thai bank app such as Krungthai, KBank or SCB, or from Shopee/Lazada). Extract the payment.
 Reply with only one JSON object, no other text:
@@ -527,39 +530,97 @@ function parseSlipText(text){
     ref:findRef(lines),note,category:guessCategory(note,merchant,text)};
 }
 
-async function readSlip(file){
-  const st=$("status"), r=reader();st.className="status";st.textContent="Reading the slip…";
-  $("pickBtn").disabled=true;
+/* Read one slip. Resolves {data, ocr?}; rejects with a message for the viewer. */
+const READ_ERRORS={not_granted:"Claude wasn't allowed to read slips here.",
+  rate_limited:"Too many requests just now. Wait a minute and try again.",
+  image_rejected:"That file couldn't be read. Use a JPEG or PNG screenshot.",
+  invalid_json:"Couldn't make sense of this slip.",
+  session_expired:"Sign in to Claude again, then retry.",
+  bad_key:"Anthropic rejected the API key. Check it in Settings."};
+async function readOne(file,onProgress){
+  const r=reader();
   try{
     if(r==="ocr"){
-      const text=await ocrText(file,msg=>{st.textContent=msg});
-      if(!text.trim()){st.className="status err";st.textContent="No text found. Try a sharper screenshot, or enter it by hand.";return}
-      const d=parseSlipText(text);
-      const missing=["merchant","amount","date"].filter(k=>d[k]==null||d[k]==="").length;
-      st.textContent=missing?"Read it, but some details were unclear. Fill in the highlighted fields.":"Read it. Check the details below.";
-      openReview(d,file,text);
-    }else{
-      const out=await (r==="hosted"?hosted:apiRead)(PROMPT,file);
-      if(!out||out.error){st.className="status err";st.textContent=(out?.error?out.error+". ":"")+"Try a clearer screenshot, or enter it by hand.";return}
-      st.textContent="Read it. Check the details below.";
-      openReview(out,file);
+      const text=await ocrText(file,onProgress);
+      if(!text.trim())throw {msg:"No text found on this slip."};
+      return{data:parseSlipText(text),ocr:text};
     }
+    const out=await (r==="hosted"?hosted:apiRead)(PROMPT,file);
+    if(!out||out.error)throw {msg:(out?.error||"This doesn't look like a payment")+"."};
+    return{data:out};
   }catch(e){
-    st.className="status err";
-    const m={not_granted:"Claude wasn't allowed to read slips here. You can still enter payments by hand.",
-      rate_limited:"Too many requests just now. Wait a minute and try again.",
-      image_rejected:"That file couldn't be read. Use a JPEG or PNG screenshot.",
-      invalid_json:"Couldn't make sense of that slip. Try again or enter it by hand.",
-      session_expired:"Sign in to Claude again, then retry.",
-      bad_key:"Anthropic rejected the API key. Check it in Settings."};
-    st.textContent=m[e?.code]||(r==="ocr"?"OCR couldn't start. Check your internet connection (it loads the first time from a CDN) and try again.":"Something went wrong reading the slip. Check your connection and try again.");
     if(r==="hosted"&&(e?.code==="not_granted"||e?.code==="sampling_disabled")){hosted=null;refreshReader()}
-  }finally{$("pickBtn").disabled=false}
+    throw {msg:e?.msg||READ_ERRORS[e?.code]||(r==="ocr"?"OCR couldn't start. Check your internet connection and try again.":"Something went wrong reading this slip.")};
+  }
 }
 
+/* ---------- batch: read slips in order, review them one at a time ---------- */
+const MAX_BATCH=30;
+let queue=[], qi=0, working=false, saved=0, skipped=0, batchId=0;
+const batchActive=()=>qi<queue.length;
+function addFiles(files){
+  const st=$("status");
+  let imgs=files.filter(f=>f&&f.type&&f.type.startsWith("image/"));
+  if(!imgs.length){st.className="status err";st.textContent="Choose image files (screenshots or photos of slips).";return}
+  const room=MAX_BATCH-(queue.length-qi);
+  if(imgs.length>room){imgs=imgs.slice(0,Math.max(room,0));st.className="status err";st.textContent=`Only ${MAX_BATCH} slips can be read at once. The first ${imgs.length} were added.`}
+  if(!batchActive()){queue=[];qi=0;saved=0;skipped=0}
+  imgs.forEach(file=>queue.push({file,state:"waiting"}));
+  $("manualBtn").disabled=true;
+  if($("review").hidden)showCurrent();
+  pump();
+}
+async function pump(){
+  if(working)return;working=true;
+  const id=batchId;
+  try{
+    for(let i=qi;i<queue.length&&id===batchId;i++){
+      const it=queue[i];if(it.state!=="waiting")continue;
+      it.state="reading";
+      if(i===qi&&$("review").hidden)setWaiting();
+      try{const res=await readOne(it.file,msg=>{if(i===qi&&$("review").hidden)setWaiting(msg)});
+        it.data=res.data;it.ocr=res.ocr;it.state="ready"}
+      catch(e){it.state="failed";it.msg=e.msg}
+      if(id!==batchId)break; // stopped while this slip was being read
+      if(i===qi&&$("review").hidden)showCurrent();
+    }
+  }finally{working=false;if(queue.some(q=>q.state==="waiting"))pump()}
+}
+function setWaiting(msg){
+  const st=$("status");st.className="status";
+  st.textContent=(queue.length>1?`Slip ${qi+1} of ${queue.length}: `:"")+(msg||"Reading…");
+}
+function showCurrent(){
+  const it=queue[qi];
+  if(!it){finishBatch();return}
+  if(it.state==="waiting"||it.state==="reading"){$("review").hidden=true;setWaiting();return}
+  const st=$("status");
+  if(it.state==="failed"){st.className="status err";st.textContent=it.msg+" Enter it by hand or skip it.";openReview({},it.file)}
+  else{
+    const d=it.data, missing=["merchant","amount","date"].some(k=>d[k]==null||d[k]==="");
+    st.className="status";st.textContent=missing?"Some details were unclear. Fill in the highlighted fields.":"";
+    openReview(d,it.file,it.ocr);
+  }
+}
+function next(wasSaved){
+  if(wasSaved)saved++;else skipped++;
+  qi++;
+  if(batchActive()){$("review").hidden=true;showCurrent()}else finishBatch();
+}
+function finishBatch(){
+  const n=saved+skipped;
+  $("review").hidden=true;$("manualBtn").disabled=false;
+  const st=$("status");st.className="status";
+  st.textContent=!n?"":n===1?(saved?"Saved.":"Skipped."):`Done. Saved ${saved} of ${n} slips${skipped?`, skipped ${skipped}`:""}.`;
+  queue=[];qi=0;saved=0;skipped=0;batchId++;
+}
+$("stopBtn").onclick=()=>{skipped+=queue.length-qi;qi=queue.length;finishBatch()};
+
 /* ---------- review form ---------- */
-$("manualBtn").onclick=()=>openReview({},null);
-$("cancelBtn").onclick=closeReview;
+$("manualBtn").onclick=()=>{if(!batchActive())openReview({},null)};
+$("cancelBtn").onclick=()=>{if(batchActive())next(false);else closeReview()};
+function updateDup(){const r=$("f-ref").value.trim();$("dupNote").hidden=!r||!txs.some(t=>t.ref===r)}
+$("f-ref").addEventListener("input",updateDup);
 function openReview(d,file,ocr){
   $("f-merchant").value=d.merchant||"";
   $("f-amount").value=d.amount!=null&&d.amount!==""?d.amount:"";
@@ -569,11 +630,17 @@ function openReview(d,file,ocr){
   $("f-ref").value=d.ref||"";
   $("f-note").value=d.note||"";
   $("f-category").value=catOf(d.category).id;
-  $("reviewTitle").textContent=file?"Check the details":"New payment";
+  const multi=batchActive()&&queue.length>1, last=qi>=queue.length-1;
+  $("reviewTitle").textContent=multi?`Slip ${qi+1} of ${queue.length}`:file?"Check the details":"New payment";
+  $("cancelBtn").textContent=batchActive()?(multi&&!last?"Skip":"Skip this slip"):"Cancel";
+  $("saveBtn").textContent=multi&&!last?"Save & next":"Save payment";
+  $("stopBtn").hidden=!(multi&&!last);
+  updateDup();
   $("ocrBox").hidden=!ocr;$("ocrText").textContent=ocr||"";$("ocrBox").open=false;
   for(const [id,k] of [["f-merchant","merchant"],["f-amount","amount"],["f-date","date"]])
     $(id).classList.toggle("missing",!!file&&(d[k]==null||d[k]===""));
   const th=$("thumb");
+  if(th.src&&th.src.startsWith("blob:"))URL.revokeObjectURL(th.src);
   if(file){th.src=URL.createObjectURL(file);th.hidden=false}else{th.hidden=true;th.removeAttribute("src")}
   $("review").hidden=false;
   $("review").scrollIntoView({behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth",block:"start"});
@@ -589,7 +656,8 @@ $("form").addEventListener("submit",async e=>{
     currency:($("f-currency").value.trim()||"THB").toUpperCase(),date:$("f-date").value,time:$("f-time").value,
     category:$("f-category").value,ref:$("f-ref").value.trim(),note:$("f-note").value.trim(),createdAt:new Date().toISOString()};
   $("saveBtn").disabled=true;
-  try{await store.add(o);view=o.date.slice(0,7);closeReview();$("status").textContent="Saved.";render()}
+  try{await store.add(o);view=o.date.slice(0,7);render();
+    if(batchActive())next(true);else{closeReview();$("status").textContent="Saved."}}
   catch(err){$("status").className="status err";$("status").textContent="Couldn't save that payment. Try again."}
   finally{$("saveBtn").disabled=false}
 });

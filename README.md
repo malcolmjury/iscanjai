@@ -1,6 +1,6 @@
 # iScanJai
 
-A one-page spending tracker that reads bank slips and receipts. You choose a screenshot, for example a Krungthai, KBank or SCB transfer slip or a Shopee receipt. Claude pulls out the payee, amount, date, time, reference and note, and suggests a category. You check the details and save. The page shows a monthly total, a breakdown by category, and a list of payments by day.
+A one-page spending tracker that reads bank slips and receipts. You choose one or more screenshots (up to 30 at once), for example a Krungthai, KBank or SCB transfer slip or a Shopee receipt. iScanJai pulls out the payee, amount, date, time, reference and note, and suggests a category. You check each slip's details and save it, then move on to the next. The page shows a monthly total, a breakdown by category, and a list of payments by day.
 
 It is a single `index.html` with no build step. Tesseract.js, sql.js and the fonts load from CDNs, so it needs an internet connection when it opens.
 
