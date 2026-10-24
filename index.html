@@ -32,6 +32,10 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--f-body);fo
 img{max-width:100%}[hidden]{display:none!important}
 .settings{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:12px}
 .toolbar{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.settings-key{display:flex;flex-direction:column;gap:6px}
+input.missing{border-color:var(--c-shop);background:var(--accent-soft)}
+.ocr summary{cursor:pointer;color:var(--muted);font-size:.9rem}
+.ocr pre{margin:8px 0 0;padding:10px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font-family:var(--f-mono);font-size:.8rem;white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;user-select:text}
 .wrap{max-width:680px;margin:0 auto;padding-block:20px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:20px}
 h1,h2{font-family:var(--f-display);margin:0;text-wrap:balance}
 h1{font-size:1.5rem;font-weight:700;letter-spacing:-.01em}
@@ -130,7 +134,8 @@ input.amount{font-family:var(--f-mono);font-size:1.1rem}
   <section class="scan" id="scanZone" aria-label="Add a payment">
     <div>
       <h2>Add a slip</h2>
-      <div class="empty-note">Choose a screenshot of a bank slip or receipt. Claude reads the amount, payee, date and note, then you check it before saving.</div>
+      <div class="empty-note">Choose a screenshot of a bank slip or receipt. iScanJai reads the amount, payee, date and note, then you check it before saving.</div>
+      <div class="empty-note" id="readerNote"></div>
     </div>
     <div class="scan-row">
       <button class="btn btn-primary" id="pickBtn">Read a slip</button>
@@ -154,6 +159,7 @@ input.amount{font-family:var(--f-mono);font-size:1.1rem}
       <label><span class="label">Category</span><select id="f-category"></select></label>
       <label><span class="label">Reference</span><input id="f-ref"></label>
       <label class="full"><span class="label">Note</span><input id="f-note"></label>
+      <details class="full ocr" id="ocrBox" hidden><summary>Text found on the slip</summary><pre id="ocrText"></pre></details>
       <div class="actions full">
         <button type="button" class="btn btn-ghost" id="cancelBtn">Cancel</button>
         <button type="submit" class="btn btn-primary" id="saveBtn">Save payment</button>
@@ -168,11 +174,19 @@ input.amount{font-family:var(--f-mono);font-size:1.1rem}
 
   <section class="settings" id="settings" hidden aria-label="Settings">
     <h2>Slip reading</h2>
-    <div class="empty-note">To read slips outside Claude, paste an Anthropic API key. It is kept in this browser only and sent straight to Anthropic's API. Each slip costs a fraction of a cent.</div>
-    <label><span class="label">Anthropic API key</span><input id="f-key" type="password" autocomplete="off" placeholder="sk-ant-…"></label>
+    <label><span class="label">Read slips with</span>
+      <select id="f-reader">
+        <option value="ocr">Free OCR on this device (Tesseract)</option>
+        <option value="claude">Claude (your Anthropic API key)</option>
+      </select></label>
+    <div class="empty-note">OCR is free and private: slips never leave your device. It works best on clear bank-app screenshots. Claude copes better with paper receipts and new slip layouts, translates Thai notes, and costs about half a US cent a slip.</div>
+    <div id="keyRow" class="settings-key">
+      <label><span class="label">Anthropic API key</span><input id="f-key" type="password" autocomplete="off" placeholder="sk-ant-…"></label>
+      <div class="empty-note">Kept in this browser only and sent straight to Anthropic's API.</div>
+    </div>
     <div class="actions">
-      <button type="button" class="btn btn-ghost" id="clearKey">Remove key</button>
-      <button type="button" class="btn btn-primary" id="saveKey">Save key</button>
+      <button type="button" class="btn btn-ghost" id="clearKey">Use OCR and remove key</button>
+      <button type="button" class="btn btn-primary" id="saveKey">Save</button>
     </div>
   </section>
 
@@ -314,24 +328,40 @@ function setBadge(){
     loading:"Opening the database…",error:""}[k];
 }
 
-/* ---------- reading slips with Claude ---------- */
-/* Two readers: Claude's own runtime when hosted on claude.ai, otherwise the
-   Anthropic API with the user's key. Both return the parsed JSON object. */
-const KEY="scan-jai-key", MODEL="claude-sonnet-5-5";
+/* ---------- reading slips ----------
+   Readers: "ocr"    — Tesseract.js, free, runs on this device (default)
+            "claude" — Anthropic API with the user's own key
+            "hosted" — Claude's runtime when the page runs on claude.ai */
+const KEY="scan-jai-key", READER="iscanjai-reader", MODEL="claude-sonnet-5-5";
+const TESS="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
 const getKey=()=>{try{return localStorage.getItem(KEY)||""}catch(e){return""}};
-let sample=null;
+const getPref=()=>{try{return localStorage.getItem(READER)||"ocr"}catch(e){return"ocr"}};
+let hosted=null;
+function reader(){if(hosted)return"hosted";return getPref()==="claude"&&getKey()?"claude":"ocr"}
 (async()=>{
   if(window.claude?.use){
     const s=await claude.use("sample");
     const lim=s&&await s.limits().catch(()=>null);
-    if(lim?.images){sample=async(p,f)=>s.json(p,{images:[f]});$("settingsBtn").hidden=true;return refreshReader()}
+    if(lim?.images){hosted=async(p,f)=>s.json(p,{images:[f]});$("settingsBtn").hidden=true}
   }
-  sample=getKey()?apiRead:null;refreshReader();
+  refreshReader();
 })();
 function refreshReader(){
-  $("pickBtn").hidden=!sample;
-  $("status").className="status";
-  $("status").textContent=sample?"":"Add an Anthropic API key in Settings to read slips. You can still add payments by hand.";
+  const r=reader();
+  $("readerNote").textContent={ocr:"Reading uses free OCR on this device. The first slip downloads about 10 MB of text-recognition data.",
+    claude:"Reading uses Claude with your API key.",hosted:"Reading uses Claude."}[r];
+}
+let tessWorker=null;
+async function ocrText(file,onProgress){
+  if(!window.Tesseract) await loadScript(TESS);
+  if(!tessWorker){
+    tessWorker=await Tesseract.createWorker(["eng","tha"],1,{logger:m=>{
+      if(m.status==="recognizing text")onProgress("Reading text… "+Math.round(m.progress*100)+"%");
+      else if(/loading|initializ/.test(m.status))onProgress("Getting OCR ready… (first time only)")}});
+    await tessWorker.setParameters({tessedit_pageseg_mode:"4"}); // one column: keeps each label beside its value
+  }
+  const {data}=await tessWorker.recognize(file);
+  return data.text||"";
 }
 function toB64(file){return new Promise((ok,bad)=>{const r=new FileReader();r.onload=()=>ok(String(r.result).split(",")[1]);r.onerror=bad;r.readAsDataURL(file)})}
 async function shrink(file){ // keep uploads small: max 1600px, JPEG
@@ -354,10 +384,16 @@ async function apiRead(prompt,file){
   const m=t.match(/\{[\s\S]*\}/);if(!m) throw {code:"invalid_json"};
   try{return JSON.parse(m[0])}catch(e){throw {code:"invalid_json"}}
 }
-$("settingsBtn").onclick=()=>{const s=$("settings");s.hidden=!s.hidden;if(!s.hidden){$("f-key").value=getKey();$("f-key").focus()}};
-$("saveKey").onclick=()=>{const k=$("f-key").value.trim();try{localStorage.setItem(KEY,k)}catch(e){}
-  sample=k?apiRead:null;refreshReader();$("settings").hidden=true;if(k)$("status").textContent="Key saved. You can read slips now."};
-$("clearKey").onclick=()=>{try{localStorage.removeItem(KEY)}catch(e){}$("f-key").value="";sample=null;refreshReader()};
+function syncKeyRow(){$("keyRow").hidden=$("f-reader").value!=="claude"}
+$("f-reader").onchange=syncKeyRow;
+$("settingsBtn").onclick=()=>{const s=$("settings");s.hidden=!s.hidden;
+  if(!s.hidden){$("f-reader").value=getPref();$("f-key").value=getKey();syncKeyRow();$("f-reader").focus()}};
+$("saveKey").onclick=()=>{const r=$("f-reader").value,k=$("f-key").value.trim();
+  if(r==="claude"&&!k){$("f-key").focus();return}
+  try{localStorage.setItem(READER,r);if(k)localStorage.setItem(KEY,k)}catch(e){}
+  refreshReader();$("settings").hidden=true;$("status").className="status";$("status").textContent="Settings saved."};
+$("clearKey").onclick=()=>{try{localStorage.removeItem(KEY);localStorage.setItem(READER,"ocr")}catch(e){}
+  $("f-key").value="";$("f-reader").value="ocr";syncKeyRow();refreshReader()};
 $("exportBtn").onclick=()=>{
   const cols=["date","time","merchant","amount","currency","category","note","ref"];
   const q=v=>'"'+String(v??"").replace(/"/g,'""')+'"';
@@ -388,15 +424,126 @@ Reply with only one JSON object, no other text:
  "category": one of "food","shop","transport","bills","health","other" (judge from payee and note)}
 If the image is not a payment, reply {"error":"short reason"}.`;
 
+/* ---------- turning OCR text into a payment ---------- */
+const MONTHS_EN={jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12};
+const MONTHS_TH={"ม.ค.":1,"ก.พ.":2,"มี.ค.":3,"เม.ย.":4,"พ.ค.":5,"มิ.ย.":6,"ก.ค.":7,"ส.ค.":8,"ก.ย.":9,"ต.ค.":10,"พ.ย.":11,"ธ.ค.":12,
+  "มกราคม":1,"กุมภาพันธ์":2,"มีนาคม":3,"เมษายน":4,"พฤษภาคม":5,"มิถุนายน":6,"กรกฎาคม":7,"สิงหาคม":8,"กันยายน":9,"ตุลาคม":10,"พฤศจิกายน":11,"ธันวาคม":12};
+const MONEY=/(?<![\d.])(\d{1,3}(?:,\d{3})+|\d+)\.(\d{2})(?![\d])/g;
+const AMOUNT_LABEL=/\b(amount|total|grand total|net|paid|payment amount)\b|จำนวนเงิน|ยอดเงิน|ยอดรวม|ยอดชำระ|รวมทั้งสิ้น|จำนวน/i;
+const NOT_AMOUNT=/\b(fee|change|cash|vat|tax|discount|balance|available|tendered|received)\b|ค่าธรรมเนียม|เงินทอน|ส่วนลด|ภาษี|คงเหลือ|เงินสด/i;
+const CAT_WORDS=[
+  ["food",/7-?eleven|makro|lotus|big ?c|tops|villa market|foodpanda|line ?man|grab ?food|restaurant|cafe|coffee|bakery|starbucks|kfc|mcdonald|ร้านอาหาร|อาหาร|ข้าว|ปลา|หมู|ไก่|กุ้ง|ผัก|ผลไม้|ตลาด|กาแฟ|ขนม|ก๋วยเตี๋ยว/i],
+  ["transport",/\bgrab\b(?! ?food)|\bbolt\b|\bbts\b|\bmrt\b|\bptt\b|shell|bangchak|esso|caltex|taxi|airport|airasia|thai airways|น้ำมัน|รถไฟ|แท็กซี่|ทางด่วน/i],
+  ["health",/hospital|clinic|pharmacy|boots|watsons|dental|โรงพยาบาล|คลินิก|ร้านยา|ยา\b|ทันตกรรม/i],
+  ["bills",/electric|\bpea\b|\bmea\b|\bpwa\b|\btrue\b|\bais\b|dtac|3bb|insurance|internet|ค่าไฟ|ค่าน้ำ|ค่าโทรศัพท์|ประกัน|ค่าเช่า/i],
+  ["shop",/shopee|lazada|central|robinson|uniqlo|ikea|homepro|power ?buy|the mall|emporium|siam paragon|ช้อป|ห้าง/i]];
+
+function toNum(s){return parseFloat(s.replace(/,/g,""))}
+function fixYear(y){y=+y;if(y<100)y=y>=43?y+2500:y+2000;if(y>2400)y-=543;return y}
+function iso(y,m,d){if(!(m>=1&&m<=12&&d>=1&&d<=31))return"";return y+"-"+String(m).padStart(2,"0")+"-"+String(d).padStart(2,"0")}
+
+function findDate(lines){
+  for(const l of lines){
+    let m=l.match(/\b(\d{1,2})\s*([A-Za-z]{3,9})\.?\s*,?\s*(\d{2,4})\b/);
+    if(m&&MONTHS_EN[m[2].toLowerCase().slice(0,m[2].toLowerCase()==="sept"?4:3)])return{date:iso(fixYear(m[3]),MONTHS_EN[m[2].toLowerCase().slice(0,3)],+m[1]),line:l};
+    m=l.match(/\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b/);
+    if(m&&MONTHS_EN[m[1].toLowerCase().slice(0,3)])return{date:iso(fixYear(m[3]),MONTHS_EN[m[1].toLowerCase().slice(0,3)],+m[2]),line:l};
+    for(const [name,mo] of Object.entries(MONTHS_TH)){
+      const i=l.indexOf(name);if(i<0)continue;
+      const d=l.slice(0,i).match(/(\d{1,2})\s*$/), y=l.slice(i+name.length).match(/^\s*(\d{2,4})/);
+      if(d&&y)return{date:iso(fixYear(y[1]),mo,+d[1]),line:l};
+    }
+    m=l.match(/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/);
+    if(m)return{date:iso(fixYear(m[1]),+m[2],+m[3]),line:l};
+    m=l.match(/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b/);
+    if(m)return{date:iso(fixYear(m[3]),+m[2],+m[1]),line:l};
+  }
+  return{date:"",line:""};
+}
+function findTime(line,lines){
+  for(const l of [line,...lines]){const m=(l||"").match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);if(m)return m[1].padStart(2,"0")+":"+m[2]}
+  return"";
+}
+function findAmount(lines){
+  const vals=l=>[...l.matchAll(MONEY)].map(m=>toNum(m[1]+"."+m[2]));
+  for(const l of lines) if(AMOUNT_LABEL.test(l)&&!NOT_AMOUNT.test(l)){const v=vals(l);if(v.length)return v[v.length-1]}
+  const withCur=lines.filter(l=>/THB|฿|บาท|\$|NZD|USD/i.test(l)&&!NOT_AMOUNT.test(l)).flatMap(vals);
+  if(withCur.length)return Math.max(...withCur);
+  const any=lines.filter(l=>!NOT_AMOUNT.test(l)).flatMap(vals);
+  return any.length?Math.max(...any):null;
+}
+const JUNK_LINE=/^(payment completed|transfer successful|successful|receipt|slip|from|to|reference|ref|amount|fee|note|transaction|date|time|krungthai|kasikorn|k\+|kbank|scb|bangkok bank|krungsri|ttb|gsb|promptpay)\b|สำเร็จ|โอนเงิน|ชำระเงินสำเร็จ|จาก|ไปยัง|ถึง/i;
+function cleanName(s){return s.replace(/\(.*?\)/g,"").replace(/^[^A-Za-z0-9฀-๿]+/,"").replace(/[^A-Za-z0-9฀-๿.)&'-]+$/,"").replace(/\s{2,}/g," ").trim()}
+function findMerchant(lines){
+  for(const l of lines){const m=l.match(/(?:payment|pay|paid|transfer(?:red)?|bill payment)\s+to\s*:?\s*(.+)/i)||l.match(/(?:ชำระเงินให้|จ่ายให้)\s*:?\s*(.+)/);
+    if(m&&cleanName(m[1]))return cleanName(m[1])}
+  for(let i=0;i<lines.length;i++){
+    if(/^\W{0,4}(to|ไปยัง|ถึง|ผู้รับ)\s*:?\s*$/i.test(lines[i])){
+      for(const n of lines.slice(i+1,i+4)){const c=cleanName(n);if(c&&/[A-Za-z฀-๿]{3}/.test(c)&&!/x{2,}|\d{3}-/i.test(c))return c}
+    }
+    const m=lines[i].match(/^\W{0,4}(?:to|ผู้รับ)\s*:\s*(.+)/i);if(m&&cleanName(m[1]))return cleanName(m[1]);
+  }
+  const ACCT=/x{2,}[-\s]?x|\bx{3}-|\b[\dx]{3}-[\dx]-[\dx]{4,5}-?[\dx]?\b|\b\d{3}-\d-\d{5}-\d\b/i;
+  const BANK=/^(ธ\.|ธนาคาร)|kbank|kasikorn|krungthai|\bscb\b|bangkok bank|krungsri|\bttb\b|\bgsb\b|ออมสิน|กรุงไทย|กสิกร|ไทยพาณิชย์|กรุงเทพ|กรุงศรี|promptpay|พร้อมเพย์|^k\+|^x[-x]/i;
+  const parties=[];
+  lines.forEach((l,j)=>{if(!ACCT.test(l))return;
+    for(let k=j-1;k>=Math.max(0,j-3);k--){const c=cleanName(lines[k]);
+      if(!c||ACCT.test(lines[k])||BANK.test(c))continue;
+      if(/[A-Za-z\u0E00-\u0E7F]{3}/.test(c)&&!JUNK_LINE.test(c)&&!parties.includes(c))parties.push(c);break}});
+  if(parties.length>=2)return parties[1];
+  for(const l of lines){const c=cleanName(l);if(c.length>=3&&/[A-Za-z฀-๿]{3}/.test(c)&&!JUNK_LINE.test(c)&&!/\d\.\d{2}\b/.test(c)&&!/\d{5,}/.test(c))return c}
+  return"";
+}
+const REF_LABEL=/(?:\bref(?:erence)?\b\.?\s*(?:no|number|code)?\.?|\btransaction\s*(?:id|no)\b\.?|รหัสอ้างอิง|เลขที่รายการ|หมายเลขอ้างอิง)\s*:?/i;
+const REF_VAL=/([A-Z€0-9-]*\d[A-Z0-9-]*)/i;
+function findRef(lines){
+  for(let i=0;i<lines.length;i++){
+    const m=lines[i].match(REF_LABEL);if(!m)continue;
+    const rest=lines[i].slice(m.index+m[0].length).trim(), next=(lines[i+1]||"").trim();
+    for(const cand of [rest,rest?"":next]){const v=(cand.split(/\s+/)[0]||"").match(REF_VAL);
+      if(v&&v[1].length>=6&&v[1]===cand.split(/\s+/)[0])return v[1].replace(/^€/,"C")}
+  }
+  return"";
+}
+function findNote(lines){
+  for(const l of lines){const m=l.match(/^\W{0,3}(?:note|memo|message|บันทึกช่วยจำ|บันทึก|หมายเหตุ)\s*:?\s*(.*)$/i);if(m&&m[1].trim())return m[1].trim()}
+  return"";
+}
+function findCurrency(text){
+  const m=text.match(/\b(THB|USD|NZD|AUD|EUR|GBP|SGD|JPY|MYR|LAK|VND)\b/);if(m)return m[1];
+  if(/฿|บาท/.test(text))return"THB";
+  return"THB";
+}
+function guessCategory(note,merchant,text){
+  for(const src of [note,merchant,text])for(const [id,re] of CAT_WORDS)if(src&&re.test(src))return id;
+  return"other";
+}
+function parseSlipText(text){
+  const lines=text.split(/\r?\n/).map(l=>l.replace(/[|]/g," ").replace(/\s+/g," ").trim()).filter(Boolean);
+  const {date,line}=findDate(lines);
+  const merchant=findMerchant(lines), note=findNote(lines);
+  const amount=findAmount(lines);
+  return{merchant,amount,currency:findCurrency(text),date,time:findTime(line,lines),
+    ref:findRef(lines),note,category:guessCategory(note,merchant,text)};
+}
+
 async function readSlip(file){
-  if(!sample){openReview({},null);return}
-  const st=$("status");st.className="status";st.textContent="Reading the slip…";
+  const st=$("status"), r=reader();st.className="status";st.textContent="Reading the slip…";
   $("pickBtn").disabled=true;
   try{
-    const r=await sample(PROMPT,file);
-    if(!r||r.error){st.className="status err";st.textContent=(r?.error?r.error+". ":"")+"Try a clearer screenshot, or enter it by hand.";return}
-    st.textContent="Read it. Check the details below.";
-    openReview(r,file);
+    if(r==="ocr"){
+      const text=await ocrText(file,msg=>{st.textContent=msg});
+      if(!text.trim()){st.className="status err";st.textContent="No text found. Try a sharper screenshot, or enter it by hand.";return}
+      const d=parseSlipText(text);
+      const missing=["merchant","amount","date"].filter(k=>d[k]==null||d[k]==="").length;
+      st.textContent=missing?"Read it, but some details were unclear. Fill in the highlighted fields.":"Read it. Check the details below.";
+      openReview(d,file,text);
+    }else{
+      const out=await (r==="hosted"?hosted:apiRead)(PROMPT,file);
+      if(!out||out.error){st.className="status err";st.textContent=(out?.error?out.error+". ":"")+"Try a clearer screenshot, or enter it by hand.";return}
+      st.textContent="Read it. Check the details below.";
+      openReview(out,file);
+    }
   }catch(e){
     st.className="status err";
     const m={not_granted:"Claude wasn't allowed to read slips here. You can still enter payments by hand.",
@@ -405,15 +552,15 @@ async function readSlip(file){
       invalid_json:"Couldn't make sense of that slip. Try again or enter it by hand.",
       session_expired:"Sign in to Claude again, then retry.",
       bad_key:"Anthropic rejected the API key. Check it in Settings."};
-    st.textContent=m[e?.code]||"Something went wrong reading the slip. Check your connection and try again.";
-    if(e?.code==="not_granted"||e?.code==="sampling_disabled"){sample=null;$("pickBtn").hidden=true}
+    st.textContent=m[e?.code]||(r==="ocr"?"OCR couldn't start. Check your internet connection (it loads the first time from a CDN) and try again.":"Something went wrong reading the slip. Check your connection and try again.");
+    if(r==="hosted"&&(e?.code==="not_granted"||e?.code==="sampling_disabled")){hosted=null;refreshReader()}
   }finally{$("pickBtn").disabled=false}
 }
 
 /* ---------- review form ---------- */
 $("manualBtn").onclick=()=>openReview({},null);
 $("cancelBtn").onclick=closeReview;
-function openReview(d,file){
+function openReview(d,file,ocr){
   $("f-merchant").value=d.merchant||"";
   $("f-amount").value=d.amount!=null&&d.amount!==""?d.amount:"";
   $("f-currency").value=(d.currency||"THB").toUpperCase();
@@ -423,6 +570,9 @@ function openReview(d,file){
   $("f-note").value=d.note||"";
   $("f-category").value=catOf(d.category).id;
   $("reviewTitle").textContent=file?"Check the details":"New payment";
+  $("ocrBox").hidden=!ocr;$("ocrText").textContent=ocr||"";$("ocrBox").open=false;
+  for(const [id,k] of [["f-merchant","merchant"],["f-amount","amount"],["f-date","date"]])
+    $(id).classList.toggle("missing",!!file&&(d[k]==null||d[k]===""));
   const th=$("thumb");
   if(file){th.src=URL.createObjectURL(file);th.hidden=false}else{th.hidden=true;th.removeAttribute("src")}
   $("review").hidden=false;
@@ -430,6 +580,7 @@ function openReview(d,file){
   (file?$("f-amount"):$("f-merchant")).focus({preventScroll:true});
 }
 function closeReview(){$("review").hidden=true;$("status").textContent=""}
+for(const id of ["f-merchant","f-amount","f-date"])$(id).addEventListener("input",e=>e.target.classList.remove("missing"));
 $("form").addEventListener("submit",async e=>{
   e.preventDefault();
   const amount=parseFloat(String($("f-amount").value).replace(/[^\d.\-]/g,""));
